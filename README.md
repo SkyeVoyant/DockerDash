@@ -1,6 +1,6 @@
 # DockerDash
 
-Minimal, real‑time Docker dashboard. See running/exited containers, mapped ports, and live stats; start/restart/stop containers in one click. Uses WebSockets end‑to‑end for instant updates.
+Minimal, real‑time Docker dashboard. See running/exited containers, mapped ports, and live stats; start/restart/stop containers in one click. Uses WebSockets end‑to‑end for instant updates. Designed to be tiny: just ~50-70 MB of RAM and negligible CPU overhead.
 <img width="1232" height="468" alt="Opera Snapshot_2025-09-16_124500_dock skyecord app" src="https://github.com/user-attachments/assets/afaf47ed-25a2-42f1-b5eb-271b6f351303" />
 
 Pinned at the top is an “All Dockers” card showing aggregate CPU/Mem/Net/Disk, the Docker engine version, and the host Linux uptime. You can start/restart/stop all containers from there.
@@ -109,3 +109,4 @@ This app talks to the Docker daemon via the Unix socket. Expose the dashboard on
 
 ## License
 GPL-2.0-only
+

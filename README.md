@@ -1,6 +1,7 @@
 # DockerDash
 
 A minimal Docker dashboard. Lists containers (running/exited), shows live per-container stats, mapped ports, and lets you Start/Restart/Stop. All live updates use WebSockets.
+<img width="1232" height="468" alt="Opera Snapshot_2025-09-16_124500_dock skyecord app" src="https://github.com/user-attachments/assets/afaf47ed-25a2-42f1-b5eb-271b6f351303" />
 
 ## Features
 - Containers list (running + exited)
@@ -20,7 +21,8 @@ A minimal Docker dashboard. Lists containers (running/exited), shows live per-co
    # edit PASSWORD and JWT_SECRET
    ```
 2. Build and run:
-   ```bash
+   ```bash![Uploading Opera Snapshot_2025-09-16_124500_dock.skyecord.app.png…]()
+
    docker compose build --no-cache
    docker compose up -d
    ```

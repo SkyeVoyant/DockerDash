@@ -1,6 +1,6 @@
 # DockerDash
 
-Minimal, real‑time Docker dashboard. See running/exited containers, mapped ports, and live stats; start/restart/stop containers in one click. Uses WebSockets end‑to‑end for instant updates. Designed to be tiny: just ~50-70 MB of RAM and negligible CPU overhead.
+Minimal, real‑time Docker dashboard. See running/exited containers, mapped ports, and live stats; start/restart/stop containers in one click. Uses WebSockets end‑to‑end for instant updates. Designed to be tiny: just ~50 MB of RAM and negligible CPU overhead.
 <img width="1232" height="472" alt="Opera Snapshot_2025-09-16_131057_dock skyecord app" src="https://github.com/user-attachments/assets/82fc4f84-c33f-4c9e-a384-d2428359885e" />
 
 

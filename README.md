@@ -6,7 +6,6 @@ Not affiliated with or endorsed by Docker, Inc.
 Minimal, real‑time Docker dashboard. See running/exited containers, mapped ports, and live stats; start/restart/stop containers in one click. Uses WebSockets end‑to‑end for instant updates. Designed to be tiny: just ~50 MB of RAM and negligible CPU overhead.
 <img width="1232" height="472" alt="Opera Snapshot_2025-09-16_131057_dock skyecord app" src="https://github.com/user-attachments/assets/82fc4f84-c33f-4c9e-a384-d2428359885e" />
 
-
 Pinned at the top is an “All Dockers” card showing aggregate CPU/Mem/Net/Disk, the Docker engine version, and the host Linux uptime. You can start/restart/stop all containers from there.
 
 ## Features
@@ -64,6 +63,14 @@ Log in with the password you set in `.env`.
 - The Stop button becomes Kill when a container is in a starting/restarting phase.
 - “All Dockers” actions skip DockerDash itself (to avoid self‑termination), but aggregate stats include DockerDash so totals match what you see.
 
+### Container display names
+- DockerDash uses the container's `container_name` (from `docker-compose.yml` or `docker run --name`) as the title shown on each card.
+- If `container_name` is not set, it falls back to the first name Docker reports (similar to `docker ps`).
+- To customize how a container appears in the dashboard, set an explicit `container_name` in your compose file.
+
+### Sorting
+- Containers are ordered alphabetically by the displayed name in the UI (client‑side). “All Dockers” is pinned at the top.
+
 ## Real‑time endpoints (WebSocket)
 - Containers stream: `/ws/containers/stream`
 - Per‑container stats: `/ws/containers/:id/stats`
@@ -113,4 +120,3 @@ This app talks to the Docker daemon via the Unix socket. Expose the dashboard on
 
 ## License
 GPL-2.0-only
-

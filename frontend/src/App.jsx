@@ -103,7 +103,7 @@ export default function App() {
             onBroadcast={(action)=> setBroadcast({ action, at: Date.now() })}
             onPhaseChange={(type, active) => setGlobalPhase(active ? type : '')}
           />
-          {containers.map(c => (
+          {[...containers].sort((a,b)=> (a.name||'').localeCompare(b.name||'', undefined, { sensitivity: 'base' })).map(c => (
             <ContainerInline key={c.id} container={c} token={token} broadcast={broadcast} globalPhase={globalPhase} />
           ))}
           {containers.length === 0 && !error && (

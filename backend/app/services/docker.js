@@ -23,17 +23,18 @@ async function getContainersSnapshot() {
       const inspect = await container.inspect();
       startedAt = inspect?.State?.StartedAt;
       finishedAt = inspect?.State?.FinishedAt;
+      const containerName = (inspect?.Name || '').replace(/^(\/)/, '');
+      const rawName = (c.Names && c.Names[0]) ? c.Names[0].replace(/^(\/)/, '') : c.Id.substring(0, 12);
+      const displayName = containerName || rawName;
+      // Derive unique host ports from listContainers data if present
+      const hostPorts = Array.isArray(c.Ports) ? Array.from(new Set(c.Ports.map(p => String(p.PublicPort || '')).filter(Boolean))) : [];
+      return { id: c.Id, name: displayName, image: c.Image, state: c.State, status: c.Status, created: c.Created, startedAt, finishedAt, hostPorts };
     } catch { startedAt = undefined; finishedAt = undefined; }
-    const labels = c.Labels || {};
-    const project = labels['com.docker.compose.project'];
-    const rawName = (c.Names && c.Names[0]) ? c.Names[0].replace(/^(\/)/, '') : c.Id.substring(0, 12);
-    const toTitle = (s) => s.split(/[^a-zA-Z0-9]+/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('');
-    let displayName = project ? toTitle(project) : rawName;
-    if (/dockerdash/i.test(rawName) || /dockerdash/i.test(project || '')) displayName = 'DockerDash';
-    // Derive unique host ports from listContainers data if present
+    const rawFallback = (c.Names && c.Names[0]) ? c.Names[0].replace(/^(\/)/, '') : c.Id.substring(0, 12);
     const hostPorts = Array.isArray(c.Ports) ? Array.from(new Set(c.Ports.map(p => String(p.PublicPort || '')).filter(Boolean))) : [];
-    return { id: c.Id, name: displayName, image: c.Image, state: c.State, status: c.Status, created: c.Created, startedAt, finishedAt, hostPorts };
+    return { id: c.Id, name: rawFallback, image: c.Image, state: c.State, status: c.Status, created: c.Created, startedAt, finishedAt, hostPorts };
   }));
+  // Do not sort here; frontend controls ordering
   return { items };
 }
 

@@ -61,10 +61,10 @@ export default function App() {
         setAggHist(prev => ({
           cpu: [...prev.cpu.slice(-39), d.cpuPercent || 0],
           mem: [...prev.mem.slice(-39), d.memUsage || 0],
-          rx:  [...prev.rx.slice(-39),  d.rxBytes || 0],
-          tx:  [...prev.tx.slice(-39),  d.txBytes || 0],
-          r:   [...prev.r.slice(-39),   d.ioRead || 0],
-          w:   [...prev.w.slice(-39),   d.ioWrite || 0],
+          rx:  [...prev.rx.slice(-39),  d.rxRate || 0],
+          tx:  [...prev.tx.slice(-39),  d.txRate || 0],
+          r:   [...prev.r.slice(-39),   d.ioReadRate || 0],
+          w:   [...prev.w.slice(-39),   d.ioWriteRate || 0],
         }))
       } catch {}
     }
@@ -232,8 +232,12 @@ function ContainerInline({ container, token, broadcast, globalPhase }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1.3fr', gap: 8, overflow: 'hidden' }}>
         <StatSpark title="CPU" values={cpuSeries} format={(v)=>`${v.toFixed(1)}%`} />
         <StatSpark title="Memory Used" values={memSeries} format={(v)=>formatBytes(v)} />
-        <StatSpark title="Networking Down" values={rxSeries} format={(v)=>formatBytes(v)} />
-        <StatSpark title="Networking Up" values={txSeries} format={(v)=>formatBytes(v)} />
+        {(() => { return (
+          <StatSpark title={`Networking Down`} values={stats.map(s=> (s.rxRate||0))} format={(v)=> `${formatBytes(v)}/s`} />
+        )})()}
+        {(() => { return (
+          <StatSpark title={`Networking Up`} values={stats.map(s=> (s.txRate||0))} format={(v)=> `${formatBytes(v)}/s`} />
+        )})()}
         {(() => { const last = stats.length ? stats[stats.length-1] : null; const lastReadTotal = last && Number.isFinite(last.ioRead) ? last.ioRead : 0; return (
           <StatSpark title={`Disk Read`} values={stats.map(s=> (s.ioReadRate||0))} format={(v)=> `${formatBytes(v)}/s | ${formatBytes(lastReadTotal)}`} />
         )})()}
@@ -278,8 +282,8 @@ function AllInline({ token, agg, hist, containers, onBroadcast, onPhaseChange })
   }
   const cpuSeries = (hist && hist.cpu && hist.cpu.length) ? hist.cpu : [agg ? (agg.cpuPercent||0) : 0]
   const memSeries = (hist && hist.mem && hist.mem.length) ? hist.mem : [agg ? (agg.memUsage||0) : 0]
-  const rxSeries = (hist && hist.rx && hist.rx.length) ? hist.rx : [agg ? (agg.rxBytes||0) : 0]
-  const txSeries = (hist && hist.tx && hist.tx.length) ? hist.tx : [agg ? (agg.txBytes||0) : 0]
+  const rxSeries = (hist && hist.rx && hist.rx.length) ? hist.rx : [agg ? (agg.rxRate||0) : 0]
+  const txSeries = (hist && hist.tx && hist.tx.length) ? hist.tx : [agg ? (agg.txRate||0) : 0]
   const ioReadSeries = (hist && hist.r && hist.r.length) ? hist.r : [agg ? (agg.ioRead||0) : 0]
   const ioWriteSeries = (hist && hist.w && hist.w.length) ? hist.w : [agg ? (agg.ioWrite||0) : 0]
   return (
@@ -300,10 +304,18 @@ function AllInline({ token, agg, hist, containers, onBroadcast, onPhaseChange })
       <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1.3fr', gap: 8, overflow: 'hidden' }}>
         <StatSpark title="CPU" values={cpuSeries} format={(v)=>`${v.toFixed(1)}%`} />
         <StatSpark title="Memory Used" values={memSeries} format={(v)=>formatBytes(v)} />
-        <StatSpark title="Networking Down" values={rxSeries} format={(v)=>formatBytes(v)} />
-        <StatSpark title="Networking Up" values={txSeries} format={(v)=>formatBytes(v)} />
-        <StatSpark title="Disk Read" values={ioReadSeries} format={(v)=>formatBytes(v)} />
-        <StatSpark title="Disk Write" values={ioWriteSeries} format={(v)=>formatBytes(v)} />
+        {(() => { return (
+          <StatSpark title="Networking Down" values={rxSeries} format={(v)=>`${formatBytes(v)}/s`} />
+        )})()}
+        {(() => { return (
+          <StatSpark title="Networking Up" values={txSeries} format={(v)=>`${formatBytes(v)}/s`} />
+        )})()}
+        {(() => { return (
+          <StatSpark title="Disk Read" values={ioReadSeries} format={(v)=>`${formatBytes(v)}/s`} />
+        )})()}
+        {(() => { return (
+          <StatSpark title="Disk Write" values={ioWriteSeries} format={(v)=>`${formatBytes(v)}/s`} />
+        )})()}
       </div>
     </div>
   )

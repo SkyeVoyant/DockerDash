@@ -95,9 +95,10 @@ server.on('upgrade', (req, socket, head) => {
           const { docker, listContainersSafe } = require('./services/docker');
           let engineVersion = '';
           try { const v = await docker.version(); engineVersion = (v && v.Version) || ''; } catch {}
-          const latest = new Map(); // id -> {cpuPercent, memUsage, ..., ioRead, ioWrite, ioReadRate, ioWriteRate}
+          const latest = new Map(); // id -> {cpuPercent, memUsage, ..., rxBytes, txBytes, rxRate, txRate, ioRead, ioWrite, ioReadRate, ioWriteRate}
           const streams = new Map();
           const prevIo = new Map(); // id -> { read, write, ts }
+          const prevNet = new Map(); // id -> { rx, tx, ts }
           let closed = false;
 
           const readUptimeSec = () => {
@@ -113,26 +114,23 @@ server.on('upgrade', (req, socket, head) => {
             const header = {
               engineVersion,
               uptimeSec: readUptimeSec(),
-              cpuPercent: 0, memUsage: 0, memLimit: 0, memPercent: 0,
-              rxBytes: 0, txBytes: 0, ioRead: 0, ioWrite: 0
+              cpuPercent: 0, memUsage: 0, memLimit: 0, memPercent: 0
             };
             ws.send(JSON.stringify(header));
           } catch {}
 
           const computeAndSend = () => {
             if (closed) return;
-            let cpuPercentTotal = 0, memUsageTotal = 0, memLimitTotal = 0, rxTotal = 0, txTotal = 0, readTotal = 0, writeTotal = 0, readRateTotal = 0, writeRateTotal = 0;
+            let cpuPercentTotal = 0, memUsageTotal = 0, memLimitTotal = 0, readRateTotal = 0, writeRateTotal = 0, rxRateTotal = 0, txRateTotal = 0;
             latest.forEach((s, id) => {
               if (!s) return;
               cpuPercentTotal += s.cpuPercent || 0;
               memUsageTotal += s.memUsage || 0;
               memLimitTotal += s.memLimit || 0;
-              rxTotal += s.rxBytes || 0;
-              txTotal += s.txBytes || 0;
-              readTotal += s.ioRead || 0;
-              writeTotal += s.ioWrite || 0;
               readRateTotal += s.ioReadRate || 0;
               writeRateTotal += s.ioWriteRate || 0;
+              rxRateTotal += s.rxRate || 0;
+              txRateTotal += s.txRate || 0;
             });
             const memPercentTotal = memLimitTotal > 0 ? (memUsageTotal / memLimitTotal) * 100 : 0;
             const payload = {
@@ -142,10 +140,8 @@ server.on('upgrade', (req, socket, head) => {
               memUsage: memUsageTotal,
               memLimit: memLimitTotal,
               memPercent: memPercentTotal,
-              rxBytes: rxTotal,
-              txBytes: txTotal,
-              ioRead: readTotal,
-              ioWrite: writeTotal,
+              rxRate: rxRateTotal,
+              txRate: txRateTotal,
               ioReadRate: readRateTotal,
               ioWriteRate: writeRateTotal
             };
@@ -175,11 +171,14 @@ server.on('upgrade', (req, socket, head) => {
                   let rRate = (io.read - prev.read) / dt; let wRate = (io.write - prev.write) / dt;
                   if (rRate < 0) rRate = 0; if (wRate < 0) wRate = 0;
                   prevIo.set(c.Id, { read: io.read, write: io.write, ts: now });
-                  latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, ioRead: io.read, ioWrite: io.write, ioReadRate: rRate, ioWriteRate: wRate });
-                  computeAndSend();
+                  const pnet = prevNet.get(c.Id) || { rx, tx, ts: now };
+                  let rxRate = (rx - pnet.rx) / dt; let txRate = (tx - pnet.tx) / dt;
+                  if (rxRate < 0) rxRate = 0; if (txRate < 0) txRate = 0;
+                  prevNet.set(c.Id, { rx, tx, ts: now });
+                  latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, rxRate, txRate, ioRead: io.read, ioWrite: io.write, ioReadRate: rRate, ioWriteRate: wRate });
                 } catch {}
               });
-              const cleanup = () => { try { stream.destroy?.() } catch {}; streams.delete(c.Id); latest.delete(c.Id); computeAndSend(); };
+              const cleanup = () => { try { stream.destroy?.() } catch {}; streams.delete(c.Id); latest.delete(c.Id); };
               stream.on('end', cleanup);
               stream.on('error', cleanup);
             } catch {}
@@ -243,11 +242,15 @@ server.on('upgrade', (req, socket, head) => {
             });
           } catch {}
 
+          // Emit at a fixed cadence so charts have consistent spacing
+          const tick = setInterval(() => { try { computeAndSend(); } catch {} }, 1000);
+
           const closeAll = () => {
             closed = true;
             streams.forEach((s) => { try { s.destroy?.() } catch {} });
             streams.clear(); latest.clear();
             try { events?.removeAllListeners?.(); } catch {}
+            clearInterval(tick);
           };
           ws.on('close', closeAll);
         })();
@@ -263,6 +266,7 @@ server.on('upgrade', (req, socket, head) => {
             const id = parts[3];
             const { docker } = require('./services/docker');
             const stream = await docker.getContainer(id).stats({ stream: true });
+            let prev = { read: 0, write: 0, rx: 0, tx: 0, ts: Date.now(), init: false };
             stream.on('data', (chunk) => {
               try {
                 const s = JSON.parse(chunk.toString('utf8'));
@@ -276,7 +280,14 @@ server.on('upgrade', (req, socket, head) => {
                 let rx = 0, tx = 0;
                 for (const k of Object.keys(net)) { rx += net[k].rx_bytes || 0; tx += net[k].tx_bytes || 0; }
                 const io = extractIoBytes(s);
-                const payload = { cpuPercent, memUsage, memLimit, memPercent, rxBytes: rx, txBytes: tx, ioRead: io.read, ioWrite: io.write };
+                const now = Date.now();
+                if (!prev.init) { prev = { read: io.read, write: io.write, rx, tx, ts: now, init: true }; }
+                const dt = Math.max(0.001, (now - prev.ts) / 1000);
+                let rr = (io.read - prev.read) / dt; let wr = (io.write - prev.write) / dt;
+                let rxr = (rx - prev.rx) / dt; let txr = (tx - prev.tx) / dt;
+                if (rr < 0) rr = 0; if (wr < 0) wr = 0; if (rxr < 0) rxr = 0; if (txr < 0) txr = 0;
+                prev = { read: io.read, write: io.write, rx, tx, ts: now, init: true };
+                const payload = { cpuPercent, memUsage, memLimit, memPercent, rxRate: rxr, txRate: txr, ioReadRate: rr, ioWriteRate: wr };
                 ws.send(JSON.stringify(payload));
               } catch {}
             });

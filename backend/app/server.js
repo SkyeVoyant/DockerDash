@@ -17,6 +17,33 @@ const port = process.env.PORT ? Number(process.env.PORT) : 8080;
 const server = http.createServer(app);
 const serverStartMs = Date.now();
 
+// Extract block I/O bytes (read/write) from various Docker stats shapes (cgroup v1/v2)
+function extractIoBytes(statsObj) {
+  try {
+    let read = 0, write = 0;
+    const blk = statsObj && statsObj.blkio_stats ? statsObj.blkio_stats : {};
+    const arr = Array.isArray(blk.io_service_bytes_recursive) ? blk.io_service_bytes_recursive
+      : Array.isArray(blk.io_service_bytes) ? blk.io_service_bytes
+      : [];
+    if (Array.isArray(arr) && arr.length > 0) {
+      for (const entry of arr) {
+        const op = String(entry.op || entry.Op || '').toLowerCase();
+        const val = Number(entry.value ?? entry.Value ?? 0) || 0;
+        if (op.includes('read')) read += val;
+        if (op.includes('write')) write += val;
+      }
+    }
+    // Fallbacks (some engines expose storage_stats)
+    if (read === 0 && write === 0 && statsObj && statsObj.storage_stats) {
+      const ss = statsObj.storage_stats;
+      const r = Number(ss.read_size_bytes ?? 0) || 0;
+      const w = Number(ss.write_size_bytes ?? 0) || 0;
+      if (r > 0 || w > 0) { read = r; write = w; }
+    }
+    return { read, write };
+  } catch { return { read: 0, write: 0 }; }
+}
+
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 app.use(morgan('dev'));
@@ -136,10 +163,8 @@ server.on('upgrade', (req, socket, head) => {
                   const net = s.networks || {};
                   let rx = 0, tx = 0;
                   for (const k of Object.keys(net)) { rx += net[k].rx_bytes || 0; tx += net[k].tx_bytes || 0; }
-                  const blk = s.blkio_stats?.io_service_bytes_recursive || [];
-                  let read = 0, write = 0;
-                  for (const e of blk) { if (e.op === 'Read') read += e.value || 0; if (e.op === 'Write') write += e.value || 0; }
-                  latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, ioRead: read, ioWrite: write });
+                  const io = extractIoBytes(s);
+                  latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, ioRead: io.read, ioWrite: io.write });
                   computeAndSend();
                 } catch {}
               });
@@ -173,10 +198,8 @@ server.on('upgrade', (req, socket, head) => {
                 const net = s.networks || {};
                 let rx = 0, tx = 0;
                 for (const k of Object.keys(net)) { rx += net[k].rx_bytes || 0; tx += net[k].tx_bytes || 0; }
-                const blk = s.blkio_stats?.io_service_bytes_recursive || [];
-                let read = 0, write = 0;
-                for (const e of blk) { if (e.op === 'Read') read += e.value || 0; if (e.op === 'Write') write += e.value || 0; }
-                latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, ioRead: read, ioWrite: write });
+                const io = extractIoBytes(s);
+                latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, ioRead: io.read, ioWrite: io.write });
               } catch {}
             }));
             computeAndSend();
@@ -241,10 +264,8 @@ server.on('upgrade', (req, socket, head) => {
                 const net = s.networks || {};
                 let rx = 0, tx = 0;
                 for (const k of Object.keys(net)) { rx += net[k].rx_bytes || 0; tx += net[k].tx_bytes || 0; }
-                const blk = s.blkio_stats?.io_service_bytes_recursive || [];
-                let read = 0, write = 0;
-                for (const e of blk) { if (e.op === 'Read') read += e.value || 0; if (e.op === 'Write') write += e.value || 0; }
-                const payload = { cpuPercent, memUsage, memLimit, memPercent, rxBytes: rx, txBytes: tx, ioRead: read, ioWrite: write };
+                const io = extractIoBytes(s);
+                const payload = { cpuPercent, memUsage, memLimit, memPercent, rxBytes: rx, txBytes: tx, ioRead: io.read, ioWrite: io.write };
                 ws.send(JSON.stringify(payload));
               } catch {}
             });

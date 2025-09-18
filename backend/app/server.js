@@ -95,8 +95,9 @@ server.on('upgrade', (req, socket, head) => {
           const { docker, listContainersSafe } = require('./services/docker');
           let engineVersion = '';
           try { const v = await docker.version(); engineVersion = (v && v.Version) || ''; } catch {}
-          const latest = new Map();
+          const latest = new Map(); // id -> {cpuPercent, memUsage, ..., ioRead, ioWrite, ioReadRate, ioWriteRate}
           const streams = new Map();
+          const prevIo = new Map(); // id -> { read, write, ts }
           let closed = false;
 
           const readUptimeSec = () => {
@@ -120,7 +121,7 @@ server.on('upgrade', (req, socket, head) => {
 
           const computeAndSend = () => {
             if (closed) return;
-            let cpuPercentTotal = 0, memUsageTotal = 0, memLimitTotal = 0, rxTotal = 0, txTotal = 0, readTotal = 0, writeTotal = 0;
+            let cpuPercentTotal = 0, memUsageTotal = 0, memLimitTotal = 0, rxTotal = 0, txTotal = 0, readTotal = 0, writeTotal = 0, readRateTotal = 0, writeRateTotal = 0;
             latest.forEach((s, id) => {
               if (!s) return;
               cpuPercentTotal += s.cpuPercent || 0;
@@ -130,6 +131,8 @@ server.on('upgrade', (req, socket, head) => {
               txTotal += s.txBytes || 0;
               readTotal += s.ioRead || 0;
               writeTotal += s.ioWrite || 0;
+              readRateTotal += s.ioReadRate || 0;
+              writeRateTotal += s.ioWriteRate || 0;
             });
             const memPercentTotal = memLimitTotal > 0 ? (memUsageTotal / memLimitTotal) * 100 : 0;
             const payload = {
@@ -142,7 +145,9 @@ server.on('upgrade', (req, socket, head) => {
               rxBytes: rxTotal,
               txBytes: txTotal,
               ioRead: readTotal,
-              ioWrite: writeTotal
+              ioWrite: writeTotal,
+              ioReadRate: readRateTotal,
+              ioWriteRate: writeRateTotal
             };
             try { ws.send(JSON.stringify(payload)); } catch {}
           };
@@ -164,7 +169,13 @@ server.on('upgrade', (req, socket, head) => {
                   let rx = 0, tx = 0;
                   for (const k of Object.keys(net)) { rx += net[k].rx_bytes || 0; tx += net[k].tx_bytes || 0; }
                   const io = extractIoBytes(s);
-                  latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, ioRead: io.read, ioWrite: io.write });
+                  const now = Date.now();
+                  const prev = prevIo.get(c.Id) || { read: io.read, write: io.write, ts: now };
+                  const dt = Math.max(0.001, (now - prev.ts) / 1000);
+                  let rRate = (io.read - prev.read) / dt; let wRate = (io.write - prev.write) / dt;
+                  if (rRate < 0) rRate = 0; if (wRate < 0) wRate = 0;
+                  prevIo.set(c.Id, { read: io.read, write: io.write, ts: now });
+                  latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, ioRead: io.read, ioWrite: io.write, ioReadRate: rRate, ioWriteRate: wRate });
                   computeAndSend();
                 } catch {}
               });

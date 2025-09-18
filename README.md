@@ -4,7 +4,8 @@ An independent dashboard for managing Docker containers.
 Not affiliated with or endorsed by Docker, Inc.
 
 Minimal, real‑time Docker dashboard. See running/exited containers, mapped ports, and live stats; start/restart/stop containers in one click. Uses WebSockets end‑to‑end for instant updates. Designed to be tiny: just ~50 MB of RAM and negligible CPU overhead.
-<img width="2512" height="679" alt="Opera Snapshot_2025-09-18_053739_dock skyecord app" src="https://github.com/user-attachments/assets/626992de-19fa-4c0c-8e43-706f8b0bdcc0" />
+<img width="2512" height="1330" alt="Opera Snapshot_2025-09-18_054051_dock skyecord app" src="https://github.com/user-attachments/assets/198a2975-0d5a-4aaf-9480-4fff40eb7bcb" />
+
 
 Pinned at the top is an “All Dockers” card showing aggregate CPU/Mem/Net/Disk, the Docker engine version, and the host Linux uptime. You can start/restart/stop all containers from there.
 

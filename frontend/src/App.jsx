@@ -238,12 +238,8 @@ function ContainerInline({ container, token, broadcast, globalPhase }) {
         {(() => { return (
           <StatSpark title={`Networking Up`} values={stats.map(s=> (s.txRate||0))} format={(v)=> `${formatBytes(v)}/s`} />
         )})()}
-        {(() => { const last = stats.length ? stats[stats.length-1] : null; const lastReadTotal = last && Number.isFinite(last.ioRead) ? last.ioRead : 0; return (
-          <StatSpark title={`Disk Read`} values={stats.map(s=> (s.ioReadRate||0))} format={(v)=> `${formatBytes(v)}/s | ${formatBytes(lastReadTotal)}`} />
-        )})()}
-        {(() => { const last = stats.length ? stats[stats.length-1] : null; const lastWriteTotal = last && Number.isFinite(last.ioWrite) ? last.ioWrite : 0; return (
-          <StatSpark title={`Disk Write`} values={stats.map(s=> (s.ioWriteRate||0))} format={(v)=> `${formatBytes(v)}/s | ${formatBytes(lastWriteTotal)}`} />
-        )})()}
+        <StatSpark title={`Disk Read`} values={stats.map(s=> (s.ioReadRate||0))} format={(v)=> `${formatBytes(v)}/s`} />
+        <StatSpark title={`Disk Write`} values={stats.map(s=> (s.ioWriteRate||0))} format={(v)=> `${formatBytes(v)}/s`} />
       </div>
     </div>
   )

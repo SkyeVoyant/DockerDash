@@ -2,21 +2,22 @@
 
 FROM node:20-slim AS base
 WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # Backend deps
 FROM base AS backend-deps
 WORKDIR /app/backend
-COPY backend/package.json ./
-RUN npm install --omit=dev
+COPY backend/package.json backend/pnpm-lock.yaml* ./
+RUN pnpm install --prod --frozen-lockfile || pnpm install --prod
 
 # Frontend build
 FROM base AS frontend-build
 WORKDIR /app/frontend
-COPY frontend/package.json frontend/vite.config.js frontend/index.html ./
-RUN npm install
+COPY frontend/package.json frontend/pnpm-lock.yaml* frontend/vite.config.js frontend/index.html ./
+RUN pnpm install --frozen-lockfile || pnpm install
 COPY frontend/src ./src
 COPY frontend/public ./public
-RUN npm run build
+RUN pnpm run build
 
 # Runtime
 FROM node:20-slim

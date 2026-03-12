@@ -10,39 +10,13 @@ const jwt = require('jsonwebtoken');
 const { requireAuth, authenticateFromHeadersOrUrl, jwtSecret, passwordEnv } = require('./setup/auth');
 const { router: containersRouter } = require('./routes/containers');
 const { router: statsRouter } = require('./routes/stats');
+const containersStore = require('./services/containersStore');
+const statsStore = require('./services/statsStore');
 
 const { WebSocketServer } = require('ws');
 const app = express();
 const port = process.env.PORT ? Number(process.env.PORT) : 8080;
 const server = http.createServer(app);
-const serverStartMs = Date.now();
-
-// Extract block I/O bytes (read/write) from various Docker stats shapes (cgroup v1/v2)
-function extractIoBytes(statsObj) {
-  try {
-    let read = 0, write = 0;
-    const blk = statsObj && statsObj.blkio_stats ? statsObj.blkio_stats : {};
-    const arr = Array.isArray(blk.io_service_bytes_recursive) ? blk.io_service_bytes_recursive
-      : Array.isArray(blk.io_service_bytes) ? blk.io_service_bytes
-      : [];
-    if (Array.isArray(arr) && arr.length > 0) {
-      for (const entry of arr) {
-        const op = String(entry.op || entry.Op || '').toLowerCase();
-        const val = Number(entry.value ?? entry.Value ?? 0) || 0;
-        if (op.includes('read')) read += val;
-        if (op.includes('write')) write += val;
-      }
-    }
-    // Fallbacks (some engines expose storage_stats)
-    if (read === 0 && write === 0 && statsObj && statsObj.storage_stats) {
-      const ss = statsObj.storage_stats;
-      const r = Number(ss.read_size_bytes ?? 0) || 0;
-      const w = Number(ss.write_size_bytes ?? 0) || 0;
-      if (r > 0 || w > 0) { read = r; write = w; }
-    }
-    return { read, write };
-  } catch { return { read: 0, write: 0 }; }
-}
 
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
@@ -67,6 +41,62 @@ if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
 app.use(express.static(publicDir));
 app.get('*', (req, res, next) => { if (req.path.startsWith('/api')) return next(); res.sendFile(path.join(publicDir, 'index.html')); });
 
+// Always-on stores: keep containers + stats warm so UI doesn't wait on-demand.
+containersStore.start();
+statsStore.start();
+
+const containerStreamClients = new Set(); // ws
+const allStatsClients = new Set(); // ws
+const containerStatsClients = new Map(); // id -> Set(ws)
+const statsStreamClients = new Set(); // ws (all containers stats stream)
+
+function safeSend(ws, payload) {
+  try {
+    ws.send(payload);
+    return true;
+  } catch {
+    try { ws.close(); } catch {}
+    return false;
+  }
+}
+
+function broadcast(set, data) {
+  if (!set || set.size === 0) return;
+  const payload = typeof data === 'string' ? data : JSON.stringify(data);
+  for (const ws of Array.from(set)) {
+    if (!safeSend(ws, payload)) {
+      set.delete(ws);
+    }
+  }
+}
+
+containersStore.onUpdate((next) => {
+  broadcast(containerStreamClients, next);
+});
+
+statsStore.onAggregate((agg) => {
+  broadcast(allStatsClients, agg);
+});
+
+statsStore.onSample((id, sample) => {
+  const payload = JSON.stringify(sample);
+  const set = containerStatsClients.get(id);
+  if (set && set.size) {
+    for (const ws of Array.from(set)) {
+      if (!safeSend(ws, payload)) set.delete(ws);
+    }
+    if (set.size === 0) containerStatsClients.delete(id);
+  }
+
+  // Fan-out to the single "all container stats" stream.
+  if (statsStreamClients.size) {
+    const msg = JSON.stringify({ type: 'stats', ...sample });
+    for (const ws of Array.from(statsStreamClients)) {
+      if (!safeSend(ws, msg)) statsStreamClients.delete(ws);
+    }
+  }
+});
+
 // WebSockets: stats per container, containers list stream
 const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
@@ -74,229 +104,63 @@ server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url || '', 'http://localhost');
     const ok = authenticateFromHeadersOrUrl(req);
     if (!ok) { socket.destroy(); return; }
+
     // Containers stream
     if (url.pathname === '/ws/containers/stream') {
       wss.handleUpgrade(req, socket, head, (ws) => {
-        const { getContainersSnapshot, docker } = require('./services/docker');
-        let closed = false;
-        const send = async () => { try { if (!closed) ws.send(JSON.stringify(await getContainersSnapshot())); } catch {} };
-        const tick = setInterval(send, 2000);
-        let events;
-        (async () => { try { events = await docker.getEvents(); events.on('data', ()=> { void send(); }); } catch {} })();
-        void send();
-        ws.on('close', () => { closed = true; clearInterval(tick); try { events?.removeAllListeners?.(); } catch {} });
+        containerStreamClients.add(ws);
+        safeSend(ws, JSON.stringify(containersStore.getSnapshot()));
+        ws.on('close', () => { containerStreamClients.delete(ws); });
       });
       return;
     }
+
     // Aggregated stats for all containers
     if (url.pathname === '/ws/containers/all/stats') {
       wss.handleUpgrade(req, socket, head, (ws) => {
-        (async () => {
-          const { docker, listContainersSafe } = require('./services/docker');
-          let engineVersion = '';
-          try { const v = await docker.version(); engineVersion = (v && v.Version) || ''; } catch {}
-          const latest = new Map(); // id -> {cpuPercent, memUsage, ..., rxBytes, txBytes, rxRate, txRate, ioRead, ioWrite, ioReadRate, ioWriteRate}
-          const streams = new Map();
-          const prevIo = new Map(); // id -> { read, write, ts }
-          const prevNet = new Map(); // id -> { rx, tx, ts }
-          let closed = false;
-
-          const readUptimeSec = () => {
-            try {
-              const txt = fs.readFileSync('/proc/uptime', 'utf8');
-              const first = parseFloat(String(txt).split(' ')[0] || '0');
-              return Number.isFinite(first) ? Math.floor(first) : 0;
-            } catch { return 0; }
-          };
-
-          // Send an immediate header snapshot so UI shows version/uptime instantly
-          try {
-            const header = {
-              engineVersion,
-              uptimeSec: readUptimeSec(),
-              cpuPercent: 0, memUsage: 0, memLimit: 0, memPercent: 0
-            };
-            ws.send(JSON.stringify(header));
-          } catch {}
-
-          const computeAndSend = () => {
-            if (closed) return;
-            let cpuPercentTotal = 0, memUsageTotal = 0, memLimitTotal = 0, readRateTotal = 0, writeRateTotal = 0, rxRateTotal = 0, txRateTotal = 0;
-            latest.forEach((s, id) => {
-              if (!s) return;
-              cpuPercentTotal += s.cpuPercent || 0;
-              memUsageTotal += s.memUsage || 0;
-              memLimitTotal += s.memLimit || 0;
-              readRateTotal += s.ioReadRate || 0;
-              writeRateTotal += s.ioWriteRate || 0;
-              rxRateTotal += s.rxRate || 0;
-              txRateTotal += s.txRate || 0;
-            });
-            const memPercentTotal = memLimitTotal > 0 ? (memUsageTotal / memLimitTotal) * 100 : 0;
-            const payload = {
-              engineVersion,
-              uptimeSec: readUptimeSec(),
-              cpuPercent: cpuPercentTotal,
-              memUsage: memUsageTotal,
-              memLimit: memLimitTotal,
-              memPercent: memPercentTotal,
-              rxRate: rxRateTotal,
-              txRate: txRateTotal,
-              ioReadRate: readRateTotal,
-              ioWriteRate: writeRateTotal
-            };
-            try { ws.send(JSON.stringify(payload)); } catch {}
-          };
-
-          const attach = async (c) => {
-            if (streams.has(c.Id)) return;
-            try {
-              const stream = await docker.getContainer(c.Id).stats({ stream: true });
-              streams.set(c.Id, stream);
-              stream.on('data', (chunk) => {
-                try {
-                  const s = JSON.parse(chunk.toString('utf8'));
-                  const cpuDelta = (s.cpu_stats?.cpu_usage?.total_usage || 0) - (s.precpu_stats?.cpu_usage?.total_usage || 0);
-                  const systemDelta = (s.cpu_stats?.system_cpu_usage || 0) - (s.precpu_stats?.system_cpu_usage || 0);
-                  const cpuPercent = systemDelta > 0 ? (cpuDelta / systemDelta) * (s.cpu_stats?.online_cpus || 1) * 100 : 0;
-                  const memUsage = s.memory_stats?.usage || 0;
-                  const memLimit = s.memory_stats?.limit || 0;
-                  const net = s.networks || {};
-                  let rx = 0, tx = 0;
-                  for (const k of Object.keys(net)) { rx += net[k].rx_bytes || 0; tx += net[k].tx_bytes || 0; }
-                  const io = extractIoBytes(s);
-                  const now = Date.now();
-                  const prev = prevIo.get(c.Id) || { read: io.read, write: io.write, ts: now };
-                  const dt = Math.max(0.001, (now - prev.ts) / 1000);
-                  let rRate = (io.read - prev.read) / dt; let wRate = (io.write - prev.write) / dt;
-                  if (rRate < 0) rRate = 0; if (wRate < 0) wRate = 0;
-                  prevIo.set(c.Id, { read: io.read, write: io.write, ts: now });
-                  const pnet = prevNet.get(c.Id) || { rx, tx, ts: now };
-                  let rxRate = (rx - pnet.rx) / dt; let txRate = (tx - pnet.tx) / dt;
-                  if (rxRate < 0) rxRate = 0; if (txRate < 0) txRate = 0;
-                  prevNet.set(c.Id, { rx, tx, ts: now });
-                  latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, rxRate, txRate, ioRead: io.read, ioWrite: io.write, ioReadRate: rRate, ioWriteRate: wRate });
-                } catch {}
-              });
-              const cleanup = () => { try { stream.destroy?.() } catch {}; streams.delete(c.Id); latest.delete(c.Id); };
-              stream.on('end', cleanup);
-              stream.on('error', cleanup);
-            } catch {}
-          };
-
-          const detach = (id) => {
-            const stream = streams.get(id);
-            if (stream) { try { stream.destroy?.() } catch {}; streams.delete(id); }
-            latest.delete(id);
-            computeAndSend();
-          };
-
-          // Prime latest with a one-time non-stream stats fetch, then attach live streams
-          try {
-            const list = await listContainersSafe(2000);
-            await Promise.all(list.map(async (c) => {
-              if (c.State !== 'running') return;
-              try {
-                const cont = docker.getContainer(c.Id);
-                const raw = await cont.stats({ stream: false });
-                const s = typeof raw === 'string' ? JSON.parse(raw) : raw;
-                const cpuDelta = (s.cpu_stats?.cpu_usage?.total_usage || 0) - (s.precpu_stats?.cpu_usage?.total_usage || 0);
-                const systemDelta = (s.cpu_stats?.system_cpu_usage || 0) - (s.precpu_stats?.system_cpu_usage || 0);
-                const cpuPercent = systemDelta > 0 ? (cpuDelta / systemDelta) * (s.cpu_stats?.online_cpus || 1) * 100 : 0;
-                const memUsage = s.memory_stats?.usage || 0;
-                const memLimit = s.memory_stats?.limit || 0;
-                const net = s.networks || {};
-                let rx = 0, tx = 0;
-                for (const k of Object.keys(net)) { rx += net[k].rx_bytes || 0; tx += net[k].tx_bytes || 0; }
-                const io = extractIoBytes(s);
-                latest.set(c.Id, { cpuPercent, memUsage, memLimit, rxBytes: rx, txBytes: tx, ioRead: io.read, ioWrite: io.write });
-              } catch {}
-            }));
-            computeAndSend();
-            // Now attach live streams
-            await Promise.all(list.map(c => c.State === 'running' ? attach(c) : undefined));
-          } catch {}
-
-          // Listen to container lifecycle events to attach/detach dynamically
-          let events;
-          try {
-            events = await docker.getEvents();
-            events.on('data', (buf) => {
-              try {
-                const evt = JSON.parse(buf.toString('utf8'));
-                const id = evt?.id || evt?.Actor?.ID;
-                const status = evt?.status || '';
-                if (!id) return;
-                if (status === 'start') {
-                  // Fetch container info to pass to attach
-                  docker.getContainer(id).inspect((err, info) => {
-                    if (err || !info) return;
-                    const names = info.Name ? [info.Name] : [];
-                    const image = info.Config?.Image || '';
-                    attach({ Id: id, Names: names, Image: image, State: 'running' });
-                  });
-                } else if (status === 'die' || status === 'stop' || status === 'destroy') {
-                  detach(id);
-                }
-              } catch {}
-            });
-          } catch {}
-
-          // Emit at a fixed cadence so charts have consistent spacing
-          const tick = setInterval(() => { try { computeAndSend(); } catch {} }, 1000);
-
-          const closeAll = () => {
-            closed = true;
-            streams.forEach((s) => { try { s.destroy?.() } catch {} });
-            streams.clear(); latest.clear();
-            try { events?.removeAllListeners?.(); } catch {}
-            clearInterval(tick);
-          };
-          ws.on('close', closeAll);
-        })();
+        allStatsClients.add(ws);
+        safeSend(ws, JSON.stringify(statsStore.getAggregate()));
+        ws.on('close', () => { allStatsClients.delete(ws); });
       });
       return;
     }
+
+    // Single stream with per-container stat updates (reduces 1-WS-per-container overhead).
+    if (url.pathname === '/ws/containers/stats/stream') {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        statsStreamClients.add(ws);
+        safeSend(ws, JSON.stringify({ type: 'init', items: statsStore.getAllLatest() }));
+        ws.on('close', () => { statsStreamClients.delete(ws); });
+      });
+      return;
+    }
+
     // Stats per container (generic match)
     if (url.pathname.startsWith('/ws/containers/') && url.pathname.endsWith('/stats')) {
       wss.handleUpgrade(req, socket, head, (ws) => {
-        (async () => {
-          try {
-            const parts = url.pathname.split('/');
-            const id = parts[3];
-            const { docker } = require('./services/docker');
-            const stream = await docker.getContainer(id).stats({ stream: true });
-            let prev = { read: 0, write: 0, rx: 0, tx: 0, ts: Date.now(), init: false };
-            stream.on('data', (chunk) => {
-              try {
-                const s = JSON.parse(chunk.toString('utf8'));
-                const cpuDelta = (s.cpu_stats?.cpu_usage?.total_usage || 0) - (s.precpu_stats?.cpu_usage?.total_usage || 0);
-                const systemDelta = (s.cpu_stats?.system_cpu_usage || 0) - (s.precpu_stats?.system_cpu_usage || 0);
-                const cpuPercent = systemDelta > 0 ? (cpuDelta / systemDelta) * (s.cpu_stats?.online_cpus || 1) * 100 : 0;
-                const memUsage = s.memory_stats?.usage || 0;
-                const memLimit = s.memory_stats?.limit || 0;
-                const memPercent = memLimit > 0 ? (memUsage / memLimit) * 100 : 0;
-                const net = s.networks || {};
-                let rx = 0, tx = 0;
-                for (const k of Object.keys(net)) { rx += net[k].rx_bytes || 0; tx += net[k].tx_bytes || 0; }
-                const io = extractIoBytes(s);
-                const now = Date.now();
-                if (!prev.init) { prev = { read: io.read, write: io.write, rx, tx, ts: now, init: true }; }
-                const dt = Math.max(0.001, (now - prev.ts) / 1000);
-                let rr = (io.read - prev.read) / dt; let wr = (io.write - prev.write) / dt;
-                let rxr = (rx - prev.rx) / dt; let txr = (tx - prev.tx) / dt;
-                if (rr < 0) rr = 0; if (wr < 0) wr = 0; if (rxr < 0) rxr = 0; if (txr < 0) txr = 0;
-                prev = { read: io.read, write: io.write, rx, tx, ts: now, init: true };
-                const payload = { cpuPercent, memUsage, memLimit, memPercent, rxRate: rxr, txRate: txr, ioReadRate: rr, ioWriteRate: wr };
-                ws.send(JSON.stringify(payload));
-              } catch {}
-            });
-            const closeAll = () => { try { stream.destroy?.() } catch {}; try { ws.close(); } catch {} };
-            stream.on('end', closeAll);
-            stream.on('error', closeAll);
-            ws.on('close', closeAll);
-          } catch { try { ws.close(); } catch {} }
-        })();
+        const parts = url.pathname.split('/');
+        const id = parts[3];
+        if (!id) {
+          try { ws.close(); } catch {}
+          return;
+        }
+
+        let set = containerStatsClients.get(id);
+        if (!set) {
+          set = new Set();
+          containerStatsClients.set(id, set);
+        }
+        set.add(ws);
+
+        const last = statsStore.getLatest(id);
+        if (last) safeSend(ws, JSON.stringify(last));
+
+        ws.on('close', () => {
+          const bucket = containerStatsClients.get(id);
+          if (!bucket) return;
+          bucket.delete(ws);
+          if (bucket.size === 0) containerStatsClients.delete(id);
+        });
       });
       return;
     }
@@ -305,5 +169,3 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(port, () => { console.log(`Server listening on http://localhost:${port}`); });
-
-

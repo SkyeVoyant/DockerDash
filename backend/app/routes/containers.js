@@ -1,14 +1,14 @@
 const express = require('express');
-const { docker, getContainersSnapshot } = require('../services/docker');
+const { docker } = require('../services/docker');
+const containersStore = require('../services/containersStore');
 
 const router = express.Router();
 
 router.get('/', async (_req, res) => {
-  try { res.json(await getContainersSnapshot()); }
+  // Return the warmed snapshot from containersStore.
+  try { res.json(containersStore.getSnapshot()); }
   catch { res.status(500).json({ error: 'Failed to list containers' }); }
 });
-
-// SSE stream removed in favor of WebSocket at /ws/containers/stream
 
 router.post('/:id/start', async (req, res) => { const id = req.params.id; try { await docker.getContainer(id).start(); res.json({ ok: true }); } catch { res.status(500).json({ error: 'Failed to start' }); } });
 router.post('/:id/stop', async (req, res) => { const id = req.params.id; try { await docker.getContainer(id).stop({ t: 10 }); res.json({ ok: true }); } catch { res.status(500).json({ error: 'Failed to stop' }); } });
@@ -41,5 +41,3 @@ router.get('/:id/inspect', async (req, res) => {
 function reqOnClose(res, cb) { const req = res.req; const onClose = () => { try { cb(); } catch {} }; req.on('close', onClose); }
 
 module.exports = { router };
-
-

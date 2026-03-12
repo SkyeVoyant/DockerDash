@@ -4,11 +4,16 @@ services:
     image: dockerdash:new
     container_name: DockerDash
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     env_file:
       - .env
+    environment:
+      # Fallback path if Docker's "list all containers" API is slow/unresponsive.
+      - DOCKERDASH_CONTAINERS_DIR=/host_docker_containers
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/containers:/host_docker_containers:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

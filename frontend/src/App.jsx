@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-// No external API helper; inline fetch for simplicity
-// Simplified UI: inline container cards with actions and stats
+import { memo, useEffect, useMemo, useState } from 'react'
+import { connectContainerStats, disconnectContainerStats, reconcileContainerStats, useContainerStats } from './containerStatsStore'
 
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem('token') || '')
@@ -15,6 +14,10 @@ export default function App() {
   const [error, setError] = useState('')
 
   useEffect(() => { if (token) localStorage.setItem('token', token) }, [token])
+
+  const sortedContainers = useMemo(() => (
+    [...containers].sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' }))
+  ), [containers])
 
   const login = async () => {
     const res = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) })
@@ -72,6 +75,19 @@ export default function App() {
     return () => { try { ws.close() } catch {} }
   }, [token])
 
+  useEffect(() => {
+    if (!token) {
+      disconnectContainerStats()
+      return
+    }
+    connectContainerStats(token)
+    return () => disconnectContainerStats()
+  }, [token])
+
+  useEffect(() => {
+    reconcileContainerStats(containers.map((container) => container.id))
+  }, [containers])
+
   if (!token) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0b0f14', color: '#e5e7eb' }}>
@@ -103,7 +119,7 @@ export default function App() {
             onBroadcast={(action)=> setBroadcast({ action, at: Date.now() })}
             onPhaseChange={(type, active) => setGlobalPhase(active ? type : '')}
           />
-          {[...containers].sort((a,b)=> (a.name||'').localeCompare(b.name||'', undefined, { sensitivity: 'base' })).map(c => (
+          {sortedContainers.map(c => (
             <ContainerInline key={c.id} container={c} token={token} broadcast={broadcast} globalPhase={globalPhase} />
           ))}
           {containers.length === 0 && !error && (
@@ -111,15 +127,15 @@ export default function App() {
           )}
         </div>
       </main>
-      {/* Modal removed */}
     </div>
   )
 }
 
-function ContainerInline({ container, token, broadcast, globalPhase }) {
-  const [now, setNow] = useState(Date.now())
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t) }, [])
+const ContainerInline = memo(function ContainerInline({ container, token, broadcast, globalPhase }) {
+  const stats = useContainerStats(container.id)
+
   const uptime = useMemo(() => {
+    const now = Date.now()
     const isRunning = container.state === 'running'
     const ref = isRunning ? container.startedAt : container.finishedAt
     if (!ref) return undefined
@@ -129,9 +145,7 @@ function ContainerInline({ container, token, broadcast, globalPhase }) {
     const h = Math.floor(diff / 3600), m = Math.floor((diff % 3600) / 60), s = diff % 60
     const parts = []; if (h) parts.push(`${h}h`); if (m || h) parts.push(`${m}m`); parts.push(`${s}s`)
     return parts.join(' ')
-  }, [now, container.startedAt, container.finishedAt, container.state])
-  const [stats, setStats] = useState([])
-  const [inspect, setInspect] = useState(null)
+  }, [stats, container.startedAt, container.finishedAt, container.state])
   const [busy, setBusy] = useState('')
   const [phase, setPhase] = useState('idle') // 'idle'|'starting'|'restarting'|'stopping'
   useEffect(() => {
@@ -147,21 +161,6 @@ function ContainerInline({ container, token, broadcast, globalPhase }) {
     setTimeout(()=> setPhase('idle'), 3000)
   }, [broadcast])
   const [msg, setMsg] = useState('')
-  useEffect(() => {
-    // live via WebSocket
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const url = new URL(`/ws/containers/${container.id}/stats`, window.location.origin)
-    url.searchParams.set('token', token)
-    const ws = new WebSocket(`${proto}://${window.location.host}${url.pathname}${url.search}`)
-    ws.onmessage = (ev) => { try { const s = JSON.parse(typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)); setStats(prev => [...prev.slice(-119), s]) } catch {} }
-    ws.onerror = () => {}
-    return () => { try { ws.close() } catch {} }
-  }, [container.id, token])
-
-  useEffect(() => {
-    fetch(`/api/containers/${container.id}/inspect`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json()).then(setInspect).catch(() => setInspect(null))
-  }, [container.id, token])
 
   const action = async (type) => {
     if (busy) return
@@ -197,12 +196,6 @@ function ContainerInline({ container, token, broadcast, globalPhase }) {
   const globalDisableRestart = globalPhase === 'restart'
   const globalDisableStop = globalPhase === 'stop'
   const killMode = phase === 'starting' || phase === 'restarting'
-  const portsObj = (inspect && inspect.NetworkSettings && inspect.NetworkSettings.Ports) || {}
-  const hostPortsSet = new Set()
-  Object.entries(portsObj).forEach(([containerPort, arr]) => {
-    if (Array.isArray(arr)) arr.forEach(m => { if (m && m.HostPort) hostPortsSet.add(m.HostPort) })
-  })
-  const portsList = Array.from(hostPortsSet)
   const lowerName = (container.name || '').toLowerCase()
   const lowerImage = (container.image || '').toLowerCase()
   const disableRebuild = lowerName.includes('dockerdash') || lowerImage.includes('dockerdash')
@@ -212,9 +205,9 @@ function ContainerInline({ container, token, broadcast, globalPhase }) {
       <div style={{ fontWeight: 600, marginBottom: 4 }}>{container.name}</div>
       <div style={{ color: '#9aa4b2', fontSize: 12, marginBottom: 8 }}>
         {container.image}
-        {((container.hostPorts && container.hostPorts.length>0) || portsList.length>0) && (
+        {(container.hostPorts && container.hostPorts.length>0) && (
           <>
-            {' '}|{' '}Ports: {(container.hostPorts && container.hostPorts.length? container.hostPorts : portsList).join(', ')}
+            {' '}|{' '}Ports: {container.hostPorts.join(', ')}
           </>
         )}
       </div>
@@ -243,11 +236,9 @@ function ContainerInline({ container, token, broadcast, globalPhase }) {
       </div>
     </div>
   )
-}
+})
 
 function AllInline({ token, agg, hist, containers, onBroadcast, onPhaseChange }) {
-  const [now, setNow] = useState(Date.now())
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t) }, [])
   const uptime = useMemo(() => {
     if (!agg || typeof agg.uptimeSec !== 'number') return undefined
     const diff = Math.max(0, Math.floor(agg.uptimeSec))
@@ -280,8 +271,8 @@ function AllInline({ token, agg, hist, containers, onBroadcast, onPhaseChange })
   const memSeries = (hist && hist.mem && hist.mem.length) ? hist.mem : [agg ? (agg.memUsage||0) : 0]
   const rxSeries = (hist && hist.rx && hist.rx.length) ? hist.rx : [agg ? (agg.rxRate||0) : 0]
   const txSeries = (hist && hist.tx && hist.tx.length) ? hist.tx : [agg ? (agg.txRate||0) : 0]
-  const ioReadSeries = (hist && hist.r && hist.r.length) ? hist.r : [agg ? (agg.ioRead||0) : 0]
-  const ioWriteSeries = (hist && hist.w && hist.w.length) ? hist.w : [agg ? (agg.ioWrite||0) : 0]
+  const ioReadSeries = (hist && hist.r && hist.r.length) ? hist.r : [agg ? (agg.ioReadRate||0) : 0]
+  const ioWriteSeries = (hist && hist.w && hist.w.length) ? hist.w : [agg ? (agg.ioWriteRate||0) : 0]
   return (
     <div style={{ background: '#151a21', border: '1px solid #1f2530', borderRadius: 12, padding: 16 }}>
       <div style={{ fontWeight: 600, marginBottom: 4 }}>All Dockers</div>
